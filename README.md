@@ -1,4 +1,4 @@
-## Running the Script
+### Running the Script
 
 From Terminal, Command Prompt or PowerShell, navigate to where you saved the script and run:
 
