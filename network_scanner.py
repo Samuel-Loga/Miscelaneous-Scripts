@@ -6,8 +6,27 @@ import os
 import sys
 import csv
 from tabulate import tabulate
+from datetime import datetime
 
 
+# ------------------ Helpers ------------------ #
+
+def ensure_folder(folder_name):
+    """Ensure folder exists"""
+    if not os.path.exists(folder_name):
+        os.makedirs(folder_name)
+    return folder_name
+
+def timestamp():
+    """Return current timestamp string"""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def sanitize_filename(name: str) -> str:
+    """Sanitize IP/hostname for safe filenames"""
+    return name.replace("/", "-").replace(":", "_").replace(" ", "_")
+
+
+# ------------------ Target Loading ------------------ #
 def load_targets(file_path=None, target=None):
     """Load targets from file or direct input"""
     targets = []
@@ -22,7 +41,8 @@ def load_targets(file_path=None, target=None):
     return targets
 
 
-def discover_hosts(targets, use_ipv6=False):
+# ------------------ Host Discovery ------------------ #
+def discover_hosts(targets, use_ipv6=False, scan_folder=None, base_name="scan"):
     """Ping sweep to find live hosts before scanning"""
     nm = nmap.PortScanner()
     live_hosts = []
@@ -44,9 +64,20 @@ def discover_hosts(targets, use_ipv6=False):
         except Exception as e:
             print(f"❌ Error discovering {target}: {e}")
 
+    # Save live hosts file alongside scan results
+    if scan_folder:
+        filename = os.path.join(scan_folder, f"{base_name}_livehosts_{timestamp()}.txt")
+        with open(filename, "w", encoding="utf-8") as f:
+            if live_hosts:
+                f.write("\n".join(live_hosts))
+            else:
+                f.write("No live hosts found.")
+        print(f"\n💾 Live hosts saved to: {filename}")
+
     return live_hosts
 
 
+# ------------------ Scanning ------------------ #
 def scan_targets(targets, use_ipv6=False, vuln_scan=False, txt_output=None):
     """Full port/service/vuln scan for live hosts, also logs to TXT"""
     nm = nmap.PortScanner()
@@ -60,7 +91,7 @@ def scan_targets(targets, use_ipv6=False, vuln_scan=False, txt_output=None):
 
     for target in targets:
         log(f"\n🔍 Scanning target: {target} (IPv6: {use_ipv6})...")
-        args = "-Pn -sV -O"  # -sS -sU -sV -O -T4 --top-ports 50" --->>> TCP + UDP with speed optimization
+        args = "-Pn -sV -O"  # TCP scan with service/version/os detection
         if vuln_scan:
             args += " --script vuln"
         if use_ipv6:
@@ -99,9 +130,8 @@ def scan_targets(targets, use_ipv6=False, vuln_scan=False, txt_output=None):
 
                 results[host] = host_data
 
-                # --- Print and log output identically ---
+                # Print and log output
                 log(f"\n📊 Results for {host} (State: {host_data['state']})")
-
                 for proto, ports in host_data["protocols"].items():
                     table = []
                     for port, info in ports.items():
@@ -138,11 +168,10 @@ def scan_targets(targets, use_ipv6=False, vuln_scan=False, txt_output=None):
     return results
 
 
-
+# ------------------ Saving Functions ------------------ #
 def save_json(results, filename):
     with open(filename, "w") as f:
         json.dump(results, f, indent=4)
-
 
 def save_csv(results, filename):
     with open(filename, "w", newline="", encoding="utf-8") as csvfile:
@@ -162,7 +191,6 @@ def save_csv(results, filename):
                         "; ".join(info["vulns"]) if info["vulns"] else ""
                     ])
 
-
 def save_txt(results, filename):
     with open(filename, "w", encoding="utf-8") as f:
         for host, data in results.items():
@@ -181,37 +209,51 @@ def save_txt(results, filename):
             f.write("\n")
 
 
+# ------------------ Main ------------------ #
 def main():
     parser = argparse.ArgumentParser(description="Python-based Nmap Network Scanner")
     parser.add_argument("--file", help="File with list of targets (IP, subnet, or hostname)")
     parser.add_argument("--target", help="Single target (IP, subnet, or hostname)")
     parser.add_argument("--ipv6", action="store_true", help="Use IPv6 scanning")
     parser.add_argument("--vuln", action="store_true", help="Enable vulnerability scanning (Nmap NSE)")
-    parser.add_argument("--output", help="Base name for output files", default="scan_results")
     args = parser.parse_args()
 
     # Load targets
     targets = load_targets(args.file, args.target)
 
-    # Open TXT file for logging
-    with open(f"{args.output}.txt", "w", encoding="utf-8") as txt_output:
-        live_hosts = discover_hosts(targets, args.ipv6)
-        if not live_hosts:
-            txt_output.write("\n⚠️ No live hosts found. Exiting.\n")
-            print("\n⚠️ No live hosts found. Exiting.")
-            sys.exit(0)
+    # Create scan_results folder
+    scan_folder = ensure_folder("scan_results")
 
-        # Perform scan
-        results = scan_targets(live_hosts, args.ipv6, args.vuln, txt_output)
+    # For each target, create timestamped files with IP/block in filename
+    for target in targets:
+        base_name = sanitize_filename(target)
+        timestamp_str = timestamp()
 
-    # Save JSON and CSV
-    save_json(results, f"{args.output}.json")
-    save_csv(results, f"{args.output}.csv")
+        txt_file = os.path.join(scan_folder, f"{base_name}_scan_{timestamp_str}.txt")
+        json_file = os.path.join(scan_folder, f"{base_name}_scan_{timestamp_str}.json")
+        csv_file = os.path.join(scan_folder, f"{base_name}_scan_{timestamp_str}.csv")
 
-    print(f"\n✅ Scan complete. Results saved as:")
-    print(f"   - {args.output}.json (structured data)")
-    print(f"   - {args.output}.csv (Excel-friendly)")
-    print(f"   - {args.output}.txt (exact console output)")
+        # Open TXT file for logging
+        with open(txt_file, "w", encoding="utf-8") as txt_output:
+            # Discover live hosts (saved in same folder)
+            live_hosts = discover_hosts([target], args.ipv6, scan_folder, base_name)
+            if not live_hosts:
+                txt_output.write("\n⚠️ No live hosts found. Exiting.\n")
+                print(f"\n⚠️ No live hosts found for {target}. Skipping.")
+                continue
+
+            # Perform scan
+            results = scan_targets(live_hosts, args.ipv6, args.vuln, txt_output)
+
+        # Save JSON and CSV
+        save_json(results, json_file)
+        save_csv(results, csv_file)
+
+        print(f"\n✅ Scan complete for {target}. Results saved in {scan_folder}:")
+        print(f"   - {json_file} (structured data)")
+        print(f"   - {csv_file} (Excel-friendly)")
+        print(f"   - {txt_file} (exact console output)")
+        print(f"   - {base_name}_livehosts_{timestamp_str}.txt (live hosts list)")
 
 
 if __name__ == "__main__":
